@@ -1,0 +1,46 @@
+{
+  "title": "Risk",
+  "trade_count": { "today": "Trades today", "window": "Trades in window" },
+  "circuit_breaker": {
+    "title": "Circuit Breaker",
+    "ACTIVE": "Active",
+    "INACTIVE": "Inactive",
+    "expires_at": "Expires at",
+    "remaining": "Remaining",
+    "reset": "Reset Circuit Breaker",
+    "confirm_title": "Reset Circuit Breaker?",
+    "confirm_body": "This will immediately disable the breaker and resume trading. Confirm root cause first.",
+    "confirm_action": "Yes, reset now"
+  },
+  "thresholds": {
+    "title": "Thresholds",
+    "max_position": "Max position %",
+    "max_drawdown": "Max drawdown %",
+    "daily_loss_limit": "Daily loss limit %",
+    "per_trade_risk": "Per-trade risk %",
+    "max_correlated": "Max correlated positions",
+    "max_trades_hour": "Max trades/hour",
+    "max_trades_day": "Max trades/day",
+    "cooldown": "Post-loss cooldown"
+  },
+  "redis_warning": "Redis unavailable: risk state may be inaccurate",
+  "hitl": {
+    "title": "Pending Approvals",
+    "position_scale": "Position scale",
+    "confidence": "Confidence",
+    "approve": "Approve",
+    "reject": "Reject",
+    "expired": "Expired",
+    "reason": {
+      "position_scale": "Large Position",
+      "divergence": "Agent Divergence",
+      "cold_start": "Cold Start Protection"
+    },
+    "confirm_approve_title": "Approve this trade?",
+    "confirm_approve_body": "Once approved, the trade will proceed through risk checks and execution.",
+    "confirm_approve_action": "Yes, approve",
+    "confirm_reject_title": "Reject this trade?",
+    "confirm_reject_body": "The trade will be cancelled and no order will be placed.",
+    "confirm_reject_action": "Yes, reject"
+  }
+}

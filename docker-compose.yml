@@ -1,0 +1,145 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: cryptotrader
+      POSTGRES_USER: ${POSTGRES_USER:-cryptotrader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cryptotrader}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Keep DB up across laptop sleep/wake. Without this, Docker Desktop
+    # restarting the engine on resume would leave postgres dead and the
+    # API would self-report ``db: unavailable`` indefinitely (observed
+    # 2026-05-03 morning recovery).
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    # Same reasoning as postgres above — auto-resume after Docker engine
+    # restart so cooldowns / cycle locks / breaker state stay reachable.
+    restart: unless-stopped
+
+  api:
+    build: .
+    ports:
+      - "8003:8003"
+    environment:
+      CRYPTOTRADER_INFRASTRUCTURE__DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cryptotrader}:${POSTGRES_PASSWORD}@postgres:5432/cryptotrader
+      CRYPTOTRADER_INFRASTRUCTURE__REDIS_URL: redis://redis:6379
+      # SEC-I5: API_KEY is required unless AUTH_MODE is explicitly set to "disabled".
+      # Setting AUTH_MODE=disabled in production logs a WARNING on every request.
+      AUTH_MODE: ${AUTH_MODE:-enabled}
+      API_KEY: ${API_KEY:-}
+      # Disable Swagger UI and ReDoc in production to prevent schema leakage (Req 7.6)
+      DOCS_ENABLED: "false"
+    env_file:
+      - .env
+    volumes:
+      - ctdata:/home/appuser/.cryptotrader
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # PROD-C2: strict healthcheck — only HTTP 200 counts as healthy.
+    # Previously the check swallowed HTTPError, so 503 (DB/Redis down) was
+    # treated as healthy and the `web` service started against a broken API.
+    # start_period gives time for migrations + first DB/Redis connect.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import sys,urllib.request as u; sys.exit(0 if u.urlopen(\"http://localhost:8003/health\", timeout=5).getcode()==200 else 1)'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports:
+      - "5173:80"
+    environment:
+      VITE_API_BASE_URL: http://api:8003
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.5"
+
+  scheduler:
+    build: .
+    command: arena scheduler start
+    environment:
+      CRYPTOTRADER_INFRASTRUCTURE__DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-cryptotrader}:${POSTGRES_PASSWORD}@postgres:5432/cryptotrader
+      CRYPTOTRADER_INFRASTRUCTURE__REDIS_URL: redis://redis:6379
+    env_file:
+      - .env
+    volumes:
+      - ctdata:/home/appuser/.cryptotrader
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Heartbeat-based liveness: scheduler writes scheduler.heartbeat after each
+    # cycle; check fails if file age > 2× interval (default ≥120s).
+    healthcheck:
+      test: ["CMD", "arena", "scheduler", "healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+          cpus: "1.0"
+
+  # Reverse proxy with automatic Let's Encrypt — only used in VPS
+  # deployment (see docs/DEPLOYMENT.md). Local-dev runs ``api`` and
+  # ``web`` on host ports directly without Caddy. Use ``--profile prod``
+  # to opt in: ``docker compose --profile prod up -d``.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["prod"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  ctdata:
+  caddydata:
+  caddyconfig:

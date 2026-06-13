@@ -1,0 +1,112 @@
+"""Risk gate that runs all checks."""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from cryptotrader.models import GateResult, TradeVerdict
+from cryptotrader.risk.checks.available_margin import AvailableMargin
+from cryptotrader.risk.checks.concentration import MacroConcentrationCheck
+from cryptotrader.risk.checks.cooldown import CooldownCheck
+from cryptotrader.risk.checks.correlation import CorrelationCheck
+from cryptotrader.risk.checks.cvar import CVaRCheck
+from cryptotrader.risk.checks.exchange import ExchangeHealthCheck
+from cryptotrader.risk.checks.loss import DailyLossLimit, DrawdownLimit
+from cryptotrader.risk.checks.position import MaxPositionSize, MaxTotalExposure
+from cryptotrader.risk.checks.rate_limit import RateLimitCheck
+from cryptotrader.risk.checks.token_security import TokenSecurityCheck
+from cryptotrader.risk.checks.volatility import FundingRateGate, VolatilityGate
+
+if TYPE_CHECKING:
+    from cryptotrader.config import RiskConfig
+    from cryptotrader.risk.state import RedisStateManager
+
+logger = logging.getLogger(__name__)
+
+
+class RiskGate:
+    def __init__(
+        self,
+        config: RiskConfig,
+        redis_state: RedisStateManager,
+        *,
+        leverage: int = 1,
+    ) -> None:
+        self.redis_state = redis_state
+        self._redis_was_configured = getattr(redis_state, "_redis", None) is not None
+        self._checks = [
+            MaxPositionSize(config.position),
+            MaxTotalExposure(config.position, leverage=leverage),
+            # spec 021 D1: OKX sCode=51008 prevention — verify free USDT
+            # margin BEFORE submitting order. Runs after MaxTotalExposure
+            # so it sees any scale clamp that may already have happened.
+            AvailableMargin(config.position, leverage=leverage),
+            DailyLossLimit(config.loss, redis_state, post_loss_minutes=config.cooldown.post_loss_minutes),
+            DrawdownLimit(config.loss, redis_state),
+            CVaRCheck(config.loss),
+            CorrelationCheck(config.position),
+            MacroConcentrationCheck(config.position),
+            CooldownCheck(config.cooldown, redis_state),
+            VolatilityGate(config.volatility),
+            FundingRateGate(config.volatility),
+            RateLimitCheck(config.rate_limit, redis_state),
+            ExchangeHealthCheck(config.exchange),
+            TokenSecurityCheck(),
+        ]
+
+    async def check(self, verdict: TradeVerdict, portfolio: dict) -> GateResult:
+        # Close actions always pass — reducing risk should never be blocked.
+        # This whitelist intentionally runs BEFORE every infrastructure check
+        # (redis, exchange health, etc) below: a close is the only safe move
+        # when infrastructure is degraded, and forcing the operator to ride
+        # out a losing position because the cache layer is flaky is exactly
+        # the failure mode risk gating should prevent. The execute step still
+        # gets to fail if the exchange is genuinely unreachable; we just
+        # don't pre-empt it at the gate.
+        if verdict.action == "close":
+            return GateResult(passed=True)
+
+        # If Redis was configured but is now unavailable, reject conservatively.
+        # Note: this only blocks NEW positions — close is already whitelisted above.
+        if self._redis_was_configured and not await self.redis_state.ping():
+            err = getattr(self.redis_state, "_last_ping_error", None) or {}
+            err_suffix = f" [{err['type']}: {err['msg']}]" if err else ""
+            logger.warning("Redis configured but unreachable — rejecting trade conservatively%s", err_suffix)
+            return GateResult(
+                passed=False,
+                rejected_by="redis_unavailable",
+                reason=f"Redis configured but unreachable — cannot verify risk state{err_suffix}",
+            )
+
+        failed: GateResult | None = None
+        proposals: list[float] = []
+        for c in self._checks:
+            try:
+                result = await c.evaluate(verdict, portfolio)
+            except Exception:
+                logger.warning(
+                    "Risk check %s raised an unexpected exception; treating as check_error",
+                    c.name,
+                    exc_info=True,
+                )
+                if failed is None:
+                    failed = GateResult(
+                        passed=False,
+                        rejected_by=c.name,
+                        reason=f"check_error: {c.name} raised an unexpected exception",
+                    )
+                continue
+
+            if not result.passed and failed is None:
+                failed = GateResult(passed=False, rejected_by=c.name, reason=result.reason)
+
+            # PROD-I3: collect scale proposals from passed checks; the strictest
+            # (min) wins. Failed checks short-circuit so their proposals don't apply.
+            if result.passed and result.scale_adjustment is not None:
+                proposals.append(result.scale_adjustment)
+
+        if failed is not None:
+            return failed
+        agg = min(proposals) if proposals else None
+        return GateResult(passed=True, scale_adjustment=agg)

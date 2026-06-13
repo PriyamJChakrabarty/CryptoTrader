@@ -1,0 +1,635 @@
+"""Portfolio manager with SQLAlchemy persistence and in-memory fallback."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+from cryptotrader._compat import UTC
+from cryptotrader.db import get_async_session, get_engine
+from cryptotrader.pair import market_type_for as _market_type_for
+from cryptotrader.state import get_pair
+
+if TYPE_CHECKING:
+    from cryptotrader.state import ArenaState
+
+logger = logging.getLogger(__name__)
+
+
+# Track which URLs have had their schema initialised
+_pm_table_ready: set[str] = set()
+
+# Singleton cache for SQLAlchemy model classes
+_pm_cache: tuple | None = None
+
+
+def _pm_models():
+    global _pm_cache
+    if _pm_cache is not None:
+        return _pm_cache
+
+    from sqlalchemy import Column, DateTime, Float, String
+    from sqlalchemy.orm import DeclarativeBase
+
+    class Base(DeclarativeBase):
+        pass
+
+    class Portfolio(Base):
+        __tablename__ = "portfolios"
+        id = Column(String, primary_key=True)
+        # Spec 013 deep-review correctness FINDING-2: bumped from VARCHAR(20)
+        # to VARCHAR(50) — futures delivery symbols like "1000PEPE/USDT:USDT-241227"
+        # are 25 chars, "BTC/USDT:USDT-241227" is 21 chars. The old 20-char limit
+        # was inherited from spot-only days and would reject these inserts.
+        pair = Column(String(50), nullable=False)
+        # spec 013: market_type is derived from pair via Pair.parse(pair).market_type
+        # Default 'spot' keeps legacy rows backward-compatible.
+        market_type = Column(String(20), nullable=False, default="spot")
+        amount = Column(Float, default=0.0)
+        avg_price = Column(Float, default=0.0)
+        # 2026-05-06: persist unrealized_pnl from exchange so DB-backed equity
+        # (used when live exchange is briefly unreachable) accounts for the
+        # last-known mark-to-market on derivatives. Spot positions write 0.0.
+        unrealized_pnl = Column(Float, nullable=False, default=0.0)
+        updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    class PortfolioSnapshot(Base):
+        __tablename__ = "portfolio_snapshots"
+        id = Column(String, primary_key=True)
+        account_id = Column(String, nullable=False)
+        total_value = Column(Float, default=0.0)
+        cash = Column(Float, default=0.0)
+        timestamp = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC), index=True)
+
+    class AccountBalance(Base):
+        __tablename__ = "portfolio_accounts"
+        id = Column(String, primary_key=True)  # account_id
+        cash = Column(Float, default=0.0)
+        updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+
+    class PortfolioBaselineReset(Base):
+        """Audit log of operator-initiated drawdown baseline resets.
+
+        Each row is an explicit "I accept the current equity as the new
+        peak baseline" decision. ``get_drawdown`` ignores snapshots with
+        ``timestamp < latest_reset.reset_at``, effectively starting the
+        peak/trough computation fresh from this point forward.
+
+        Spec: see ``spec.md`` design discussion (decoupling DrawdownLimit
+        from circuit_breaker, 2026-05-07).
+        """
+
+        __tablename__ = "portfolio_baseline_resets"
+        id = Column(String, primary_key=True)  # uuid hex
+        account_id = Column(String, nullable=False, index=True)
+        reset_at = Column(DateTime(timezone=True), nullable=False, index=True)
+        baseline_equity = Column(Float, nullable=False)
+        operator = Column(String(64), nullable=False)
+        reason = Column(String(500), nullable=False, default="")
+
+    _pm_cache = (Base, Portfolio, PortfolioSnapshot, AccountBalance, PortfolioBaselineReset)
+    return _pm_cache
+
+
+async def _pm_ensure_tables(database_url: str) -> None:
+    """Create portfolio schema on first call per database URL.
+
+    Mirrors the pattern in journal/store.py: ``create_all`` only adds new
+    tables, not new columns. spec-013 added ``portfolios.market_type``
+    after some deployments already had the table — backfill it here.
+    """
+    from sqlalchemy import text
+
+    if database_url not in _pm_table_ready:
+        Base, *_ = _pm_models()
+        engine = await get_engine(database_url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            dialect = conn.dialect.name
+            if dialect == "postgresql":
+                # Idempotent — both ADD COLUMN IF NOT EXISTS and ALTER COLUMN TYPE
+                # are no-ops on already-migrated tables. Type widening (20→50) does
+                # not require a table rewrite and holds ACCESS EXCLUSIVE briefly.
+                await conn.execute(
+                    text(
+                        "ALTER TABLE portfolios "
+                        "ADD COLUMN IF NOT EXISTS market_type VARCHAR(20) NOT NULL DEFAULT 'spot'"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE portfolios "
+                        "ADD COLUMN IF NOT EXISTS unrealized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0.0"
+                    )
+                )
+                await conn.execute(text("ALTER TABLE portfolios ALTER COLUMN pair TYPE VARCHAR(50)"))
+            elif dialect == "sqlite":
+                result = await conn.execute(text("PRAGMA table_info(portfolios)"))
+                existing = {row[1] for row in result.fetchall()}
+                if "market_type" not in existing:
+                    await conn.execute(
+                        text("ALTER TABLE portfolios ADD COLUMN market_type VARCHAR(20) NOT NULL DEFAULT 'spot'")
+                    )
+                if "unrealized_pnl" not in existing:
+                    await conn.execute(
+                        text("ALTER TABLE portfolios ADD COLUMN unrealized_pnl REAL NOT NULL DEFAULT 0.0")
+                    )
+                # SQLite ignores VARCHAR length — pair widening is a no-op there.
+        _pm_table_ready.add(database_url)
+
+
+def _ts_after(ts: Any, cutoff: datetime) -> bool:
+    """Return True iff snapshot timestamp ``ts`` is strictly after ``cutoff``.
+
+    Tolerates strings, naive datetimes, and None (None → False so we exclude
+    snapshots without a usable timestamp from post-reset windows).
+    """
+    if ts is None:
+        return False
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+    if not isinstance(ts, datetime):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=UTC)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.replace(tzinfo=UTC)
+    return ts > cutoff
+
+
+async def _pm_session(database_url: str):
+    # get_async_session initialises the engine on first call, then we ensure tables exist.
+    session = await get_async_session(database_url)
+    await _pm_ensure_tables(database_url)
+    return session
+
+
+class PortfolioManager:
+    def __init__(self, database_url: str | None = None):
+        self._db_url = database_url
+        self._memory: dict[str, dict[str, Any]] = {}
+        self._memory_cash: dict[str, float] = {}
+        self._snapshots: list[dict[str, Any]] = []
+
+    async def get_portfolio(self, account_id: str = "default") -> dict[str, Any]:
+        """Return portfolio with cash, positions, and total_value (cash + position cost basis)."""
+        positions = {}
+        cash = 0.0
+        if self._db_url:
+            try:
+                _, Portfolio, _, AccountBalance, _ = _pm_models()
+                from sqlalchemy import select
+
+                async with await _pm_session(self._db_url) as session:
+                    rows = await session.execute(select(Portfolio).where(Portfolio.id.startswith(f"{account_id}:")))
+                    for r in rows.scalars():
+                        positions[r.pair] = {
+                            "amount": r.amount,
+                            "avg_price": r.avg_price,
+                            "market_type": r.market_type or "spot",
+                            "unrealized_pnl": getattr(r, "unrealized_pnl", 0.0) or 0.0,
+                        }
+                    # Load cash
+                    acct = (
+                        await session.execute(select(AccountBalance).where(AccountBalance.id == account_id))
+                    ).scalar_one_or_none()
+                    if acct:
+                        cash = acct.cash
+                    pos_value = _equity_contribution(positions)
+                    return {
+                        "account_id": account_id,
+                        "positions": positions,
+                        "cash": cash,
+                        "total_value": cash + pos_value,
+                    }
+            except Exception as e:
+                logger.warning("DB portfolio read failed: %s", e)
+        mem = self._memory.get(account_id, {})
+        cash = self._memory_cash.get(account_id, 0.0)
+        pos_value = _equity_contribution(mem)
+        return {
+            "account_id": account_id,
+            "positions": mem,
+            "cash": cash,
+            "total_value": cash + pos_value,
+        }
+
+    async def update_position(
+        self,
+        account_id: str,
+        pair: str,
+        amount: float,
+        price: float,
+        unrealized_pnl: float = 0.0,
+    ) -> None:
+        market_type = _market_type_for(pair)
+        if self._db_url:
+            try:
+                _, Portfolio, _, _, _ = _pm_models()
+                from sqlalchemy import select
+
+                async with await _pm_session(self._db_url) as session:
+                    key = f"{account_id}:{pair}"
+                    row = (await session.execute(select(Portfolio).where(Portfolio.id == key))).scalar_one_or_none()
+                    if row:
+                        row.amount = amount
+                        row.avg_price = price
+                        row.market_type = market_type
+                        row.unrealized_pnl = unrealized_pnl
+                        row.updated_at = datetime.now(UTC)
+                    else:
+                        session.add(
+                            Portfolio(
+                                id=key,
+                                pair=pair,
+                                market_type=market_type,
+                                amount=amount,
+                                avg_price=price,
+                                unrealized_pnl=unrealized_pnl,
+                            )
+                        )
+                    await session.commit()
+                return
+            except Exception as e:
+                logger.warning("DB position update failed: %s", e)
+        if account_id not in self._memory:
+            self._memory[account_id] = {}
+        self._memory[account_id][pair] = {
+            "amount": amount,
+            "avg_price": price,
+            "market_type": market_type,
+            "unrealized_pnl": unrealized_pnl,
+        }
+
+    async def update_cash(self, account_id: str = "default", cash: float = 0.0) -> None:
+        """Persist current cash balance."""
+        if self._db_url:
+            try:
+                _, _, _, AccountBalance, _ = _pm_models()
+                from sqlalchemy import select
+
+                async with await _pm_session(self._db_url) as session:
+                    row = (
+                        await session.execute(select(AccountBalance).where(AccountBalance.id == account_id))
+                    ).scalar_one_or_none()
+                    if row:
+                        row.cash = cash
+                        row.updated_at = datetime.now(UTC)
+                    else:
+                        session.add(AccountBalance(id=account_id, cash=cash))
+                    await session.commit()
+                return
+            except Exception as e:
+                logger.warning("DB cash update failed: %s", e)
+        self._memory_cash[account_id] = cash
+
+    async def get_daily_pnl(self, account_id: str = "default") -> float | None:
+        """Return PnL in absolute units since the start of the current UTC day.
+
+        Returns ``None`` when no snapshot exists in today's window. The previous
+        "two-most-recent snapshots diff" semantics produced false circuit-breaker
+        trips after long snapshot gaps — see 2026-04-29 10:28 cycle that read a
+        stale 04-28 snapshot diff (-$375) and reported -9.42% on a ~$3,980
+        cash-only equity reading.
+
+        - 0 snaps in today's window  → ``None``  (caller treats as "unknown")
+        - 1 snap                     → ``0.0``   (baseline; no movement yet today)
+        - 2+ snaps                   → ``latest - earliest_in_window``
+        """
+        snaps = await self.load_snapshots(account_id)
+        if not snaps:
+            return None
+
+        midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        today: list[float] = []
+        for s in snaps:
+            ts = s.get("timestamp")
+            if isinstance(ts, str):
+                try:
+                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            if ts is None:
+                continue
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=UTC)
+            if ts >= midnight:
+                today.append(s["total_value"])
+
+        if not today:
+            return None
+        if len(today) == 1:
+            return 0.0
+        return today[-1] - today[0]
+
+    async def get_drawdown(self, account_id: str = "default") -> float:
+        """Compute current drawdown from portfolio snapshots.
+
+        Honors the most recent operator-initiated baseline reset: snapshots
+        with ``timestamp < latest_reset.reset_at`` are excluded so the
+        peak/trough computation starts fresh from the reset point. This
+        prevents historical losses from permanently gating new trades after
+        the operator has explicitly accepted a new baseline via
+        ``arena portfolio reset-baseline``.
+        """
+        snaps = await self.load_snapshots(account_id)
+        last_reset = await self.get_last_baseline_reset(account_id)
+        if last_reset is not None:
+            cutoff = last_reset["reset_at"]
+            snaps = [s for s in snaps if _ts_after(s.get("timestamp"), cutoff)]
+        values = [s["total_value"] for s in snaps]
+        if not values:
+            return 0.0
+        peak = max(values)
+        return (values[-1] - peak) / peak if peak > 0 else 0.0
+
+    async def get_last_baseline_reset(self, account_id: str = "default") -> dict | None:
+        """Return the most recent baseline reset for an account, or None."""
+        if not self._db_url:
+            return None
+        try:
+            _, _, _, _, PortfolioBaselineReset = _pm_models()
+            from sqlalchemy import desc, select
+
+            async with await _pm_session(self._db_url) as session:
+                rows = await session.execute(
+                    select(PortfolioBaselineReset)
+                    .where(PortfolioBaselineReset.account_id == account_id)
+                    .order_by(desc(PortfolioBaselineReset.reset_at))
+                    .limit(1)
+                )
+                r = rows.scalars().first()
+                if r is None:
+                    return None
+                return {
+                    "id": r.id,
+                    "account_id": r.account_id,
+                    "reset_at": r.reset_at,
+                    "baseline_equity": r.baseline_equity,
+                    "operator": r.operator,
+                    "reason": r.reason,
+                }
+        except Exception as e:
+            logger.warning("Baseline reset lookup failed: %s", e)
+            return None
+
+    async def record_baseline_reset(
+        self,
+        account_id: str = "default",
+        baseline_equity: float = 0.0,
+        operator: str = "unknown",
+        reason: str = "",
+    ) -> dict:
+        """Record an explicit drawdown baseline reset and return the audit row.
+
+        Operator acknowledges current equity as the new peak baseline; future
+        ``get_drawdown`` calls measure against snapshots strictly after this
+        reset's timestamp.
+        """
+        if not self._db_url:
+            raise RuntimeError("record_baseline_reset requires a database (no in-memory mode)")
+        _, _, _, _, PortfolioBaselineReset = _pm_models()
+        now = datetime.now(UTC)
+        row_id = uuid.uuid4().hex
+        async with await _pm_session(self._db_url) as session:
+            row = PortfolioBaselineReset(
+                id=row_id,
+                account_id=account_id,
+                reset_at=now,
+                baseline_equity=baseline_equity,
+                operator=operator,
+                reason=reason or "",
+            )
+            session.add(row)
+            await session.commit()
+        return {
+            "id": row_id,
+            "account_id": account_id,
+            "reset_at": now,
+            "baseline_equity": baseline_equity,
+            "operator": operator,
+            "reason": reason or "",
+        }
+
+    async def get_returns(self, account_id: str = "default", days: int = 60) -> list[float]:
+        snaps = [s["total_value"] for s in await self.load_snapshots(account_id)]
+        snaps = snaps[-days:]
+        if len(snaps) < 2:
+            return []
+        return [(snaps[i] - snaps[i - 1]) / snaps[i - 1] for i in range(1, len(snaps)) if snaps[i - 1] > 0]
+
+    async def snapshot(
+        self,
+        account_id: str = "default",
+        total_value: float = 0.0,
+        cash: float = 0.0,
+    ) -> None:
+        snap = {
+            "account_id": account_id,
+            "total_value": total_value,
+            "cash": cash,
+            "timestamp": datetime.now(UTC),
+        }
+        self._snapshots.append(snap)
+        if self._db_url:
+            try:
+                _, _, PortfolioSnapshot, _, _ = _pm_models()
+
+                async with await _pm_session(self._db_url) as session:
+                    session.add(
+                        PortfolioSnapshot(
+                            id=str(uuid.uuid4()),
+                            account_id=account_id,
+                            total_value=total_value,
+                            cash=cash,
+                        )
+                    )
+                    await session.commit()
+            except Exception as e:
+                logger.warning("DB snapshot write failed: %s", e)
+
+    async def load_snapshots(self, account_id: str) -> list[dict]:
+        """Load snapshots from DB if available, else use in-memory."""
+        if self._db_url:
+            try:
+                _, _, PortfolioSnapshot, _, _ = _pm_models()
+                from sqlalchemy import select
+
+                async with await _pm_session(self._db_url) as session:
+                    rows = await session.execute(
+                        select(PortfolioSnapshot)
+                        .where(PortfolioSnapshot.account_id == account_id)
+                        .order_by(PortfolioSnapshot.timestamp)
+                    )
+                    return [
+                        {
+                            "account_id": r.account_id,
+                            "total_value": r.total_value,
+                            "cash": r.cash if r.cash is not None else 0.0,
+                            "timestamp": r.timestamp,
+                        }
+                        for r in rows.scalars()
+                    ]
+            except Exception as e:
+                logger.warning("DB snapshot read failed: %s", e)
+        return [s for s in self._snapshots if s.get("account_id") == account_id]
+
+    async def reset(self, account_id: str = "default") -> None:
+        """Reset portfolio to clean state — delete positions, cash, and snapshots."""
+        if self._db_url:
+            try:
+                _, Portfolio, PortfolioSnapshot, AccountBalance, _ = _pm_models()
+                from sqlalchemy import delete
+
+                async with await _pm_session(self._db_url) as session:
+                    await session.execute(delete(Portfolio).where(Portfolio.id.startswith(f"{account_id}:")))
+                    await session.execute(delete(AccountBalance).where(AccountBalance.id == account_id))
+                    await session.execute(delete(PortfolioSnapshot).where(PortfolioSnapshot.account_id == account_id))
+                    await session.commit()
+                    logger.info("Portfolio reset for account %s", account_id)
+                return
+            except Exception as e:
+                logger.warning("DB portfolio reset failed: %s", e)
+        self._memory.pop(account_id, None)
+        self._memory_cash.pop(account_id, None)
+        self._snapshots = [s for s in self._snapshots if s.get("account_id") != account_id]
+
+
+def _equity_contribution(
+    positions: dict[str, dict[str, Any]],
+    *,
+    traded_pair: str = "",
+    current_price: float = 0.0,
+) -> float:
+    """Sum each position's contribution to equity, accounting for market type.
+
+    - Spot:  ``amount * avg_price`` (signed; falls back to ``current_price``
+             for the active cycle pair when no avg is stored, e.g.
+             PaperExchange seed). ``amount`` is in base currency — the asset
+             is actually held so mark-to-market value adds to equity.
+    - Perp/swap/future: ``unrealized_pnl`` only. The notional is NOT held as
+             an asset — only the margin is, and the margin is already in
+             ``cash``. Adding ``amount * price`` double-counts the margin and
+             creates phantom equity inflation (~$49K on a fresh 20.88 ETH
+             short observed 2026-05-06). Using ``-amount * price`` (signed)
+             would under-report by the same amount on shorts. Both wrong;
+             unrealized_pnl is the only correct value.
+
+    Used by both ``read_portfolio_from_exchange`` (live, traded_pair set) and
+    ``PortfolioManager.get_portfolio`` (DB / memory, traded_pair="").
+    """
+    from cryptotrader.pair import Pair as _Pair
+
+    total = 0.0
+    for p_pair, pos in positions.items():
+        try:
+            mt = _Pair.parse(p_pair).market_type
+        except (ValueError, NotImplementedError):
+            mt = pos.get("market_type") or "spot"
+        if mt != "spot":
+            total += float(pos.get("unrealized_pnl", 0.0) or 0.0)
+            continue
+        amount = pos.get("amount", 0) or 0
+        avg = float(pos.get("avg_price", 0) or 0)
+        if avg > 0:
+            price = avg
+        elif p_pair == traded_pair and current_price:
+            price = current_price
+        else:
+            price = 0.0
+        total += amount * price
+    return total
+
+
+async def read_portfolio_from_exchange(state: ArenaState) -> dict[str, Any] | None:
+    """Read current portfolio directly from exchange.
+
+    Lifted from nodes/execution.py to break the same-layer dependency
+    between nodes/verdict.py and nodes/execution.py.  The function is
+    defined here (portfolio layer) and re-exported from nodes/execution.py
+    for backward compatibility.
+
+    Returns None on failure.  Includes positions with avg_price and
+    unrealized PnL.
+    """
+    # Lazy import to avoid a module-level circular dependency:
+    # portfolio.manager -> nodes.execution -> portfolio.manager (PortfolioManager).
+    # All cross-layer imports inside nodes.execution are already lazy, so this
+    # late binding is safe and consistent with the existing pattern.
+    from cryptotrader.nodes.execution import _get_exchange
+
+    try:
+        pair = get_pair(state).canonical()
+    except (KeyError, TypeError, ValueError):
+        pair = "BTC/USDT"
+    current_price = state["data"].get("snapshot_summary", {}).get("price", 0)
+
+    try:
+        exchange, _ = await _get_exchange(state, pair)
+        balances = await exchange.get_balance()
+        # spec 021 D1: also pull `free` balance so risk-gate margin check can
+        # reject before sending the order to OKX (avoids sCode=51008 reject).
+        free_balances: dict = {}
+        try:
+            free_balances = await exchange.get_free_balance()
+        except (AttributeError, Exception):  # noqa: BLE001 — paper exchange / older adapter
+            free_balances = balances
+
+        # Get positions with avg_price and unrealized PnL
+        current_prices = {pair: current_price} if current_price else {}
+        try:
+            # PaperExchange accepts current_prices; LiveExchange does not
+            positions = await exchange.get_positions(current_prices=current_prices)
+        except TypeError:
+            positions = await exchange.get_positions()
+    except Exception as e:
+        logger.warning("Failed to read portfolio from exchange: %s: %s", type(e).__name__, e, exc_info=True)
+        # Stash error context on state so the rejection event can carry it.
+        state["data"]["_portfolio_read_error"] = {"type": type(e).__name__, "msg": str(e)}
+        return None
+
+    cash = balances.get("USDT", 0.0)
+    free_cash = free_balances.get("USDT", cash)
+
+    # Spec ledger 2026-05-01: ccxt's fetchPositions only returns derivatives.
+    # Spot non-USDT balances (e.g. ETH from a spot market buy) were silently
+    # dropped here, so the API saw cash drain with no offsetting position
+    # ($8540 → $4697 with positions=[] after a real ETH long fill).
+    # Merge them in, priced via fetch_ticker — never substitute the active
+    # cycle's price (would inherit the wrong pair's price; same class of bug
+    # the avg_price write fix addresses on the persistence side).
+    from cryptotrader.nodes.execution import _get_market_price, _is_dust
+
+    for asset, amount in balances.items():
+        # Skip stablecoin (cash) AND post-close dust residue (ETH=2.91e-07
+        # type values) — same threshold as the persistence-side filter so
+        # the API view doesn't surface phantom microscopic positions even
+        # when OKX still reports the rounding crumbs.
+        if asset == "USDT" or _is_dust(amount):
+            continue
+        spot_pair = f"{asset}/USDT"
+        if spot_pair in positions:
+            # Perp/derivative already reported for this symbol — preserve it.
+            continue
+        avg_price = await _get_market_price(exchange, spot_pair)
+        positions[spot_pair] = {
+            "amount": amount,
+            "side": "long" if amount > 0 else "short",
+            "avg_price": avg_price,
+            "unrealized_pnl": 0.0,
+            "liquidation_price": None,
+        }
+
+    total_pos_value = _equity_contribution(positions, traded_pair=pair, current_price=current_price)
+
+    return {
+        "cash": cash,
+        "free_cash": free_cash,  # spec 021 D1: drives margin pre-check
+        "positions": positions,
+        "total_value": cash + total_pos_value,
+    }

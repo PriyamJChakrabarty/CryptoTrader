@@ -1,0 +1,312 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cryptotrader-ai"
+version = "0.1.0"
+description = "AI-powered crypto trading system using LangGraph multi-agent debate"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "langchain>=1.2.10",
+    "langchain-core>=1.3.3",
+    "langchain-openai>=1.1.14",
+    "langchain-community>=0.4.1",
+    "langchain-google-genai>=4.2",
+    "langchain-anthropic>=1.3",
+    "langgraph>=1.0.10",
+    "ccxt>=4.5.42",
+    "pandas>=2.3",
+    "httpx>=0.28",
+    "pydantic>=2.12",
+    "typer>=0.24",
+    "rich>=14.0",
+    "tomli>=2.0",
+    "redis>=7.3",
+    "sqlalchemy[asyncio]>=2.0.48",
+    "asyncpg>=0.29",
+    "aiosqlite>=0.20",
+    "fastapi>=0.135",
+    "uvicorn>=0.41",
+    "numpy>=2.2",
+    "feedparser>=6.0.12",
+    "structlog>=24.1",
+    "alembic>=1.13",
+    "apscheduler>=3.10,<4",
+    "nest-asyncio>=1.6.0",
+    "prometheus-client>=0.20",
+    "websockets>=13.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
+]
+dev = [
+    "pre-commit>=3.0",
+    "ruff>=0.8",
+]
+otel = [
+    "opentelemetry-sdk>=1.20",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.20",
+]
+
+[project.scripts]
+arena = "cli.main:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cryptotrader", "src/api", "src/cli"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=70 --cov-branch"
+
+[tool.coverage.run]
+omit = [
+    # External data provider integrations require live API credentials and network.
+    # These modules make HTTPS calls to external services (Binance, SosoValue, RSS feeds)
+    # and cannot be unit-tested without integration-test infrastructure.
+    "src/cryptotrader/data/sync.py",
+    "src/cryptotrader/data/providers/binance.py",
+    "src/cryptotrader/data/providers/rss_news.py",
+    "src/cryptotrader/data/providers/sosovalue.py",
+    # Alternative supervisor/agent pattern — not on the main execution path.
+    "src/cryptotrader/debate/researchers.py",
+    # MCP Server wrappers are thin Provider call delegates (same rationale as providers).
+    "src/cryptotrader/mcp/servers/*.py",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "C",     # flake8-comprehensions
+    "B",     # flake8-bugbear
+    "T20",   # flake8-print
+    "ASYNC", # flake8-async
+    "UP",    # pyupgrade
+    "RET",   # flake8-return (unnecessary elif/return)
+    "SIM",   # flake8-simplify (code simplification)
+    "PERF",  # perflint (performance anti-patterns)
+    "PIE",   # flake8-pie (misc improvements)
+    "RSE",   # flake8-raise (raise best practices)
+    "RUF",   # ruff-specific rules
+    "DTZ",   # flake8-datetimez (timezone-aware datetime)
+    "TID",   # flake8-tidy-imports (banned imports)
+    "PT",    # flake8-pytest-style
+    "TCH",   # flake8-type-checking (TYPE_CHECKING imports)
+    "S",     # flake8-bandit (security)
+    "N",     # pep8-naming
+]
+ignore = [
+    "S101",   # assert -- used extensively in tests
+    "S301",   # pickle -- not used, but avoid false positives
+    "S501",   # httpx verify=False -- needed for some APIs
+    "S110",   # try-except-pass -- used for best-effort data loading
+    "S105",   # hardcoded password -- false positives on config field names
+    "S106",   # hardcoded password in arg -- false positives on config
+    "RUF012", # ClassVar annotation -- too strict for dataclasses
+    "PT011",  # pytest.raises match -- too strict for unit tests
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cryptotrader", "api", "cli"]
+
+# Banned imports: domain layer (agents/, debate/, execution/, risk/, learning/)
+# must NOT import from nodes/ or graph.py (unidirectional dependency rule).
+# Files outside the domain layer that legitimately import nodes/ or graph.py
+# are listed below in per-file-ignores with TID251 exempted.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"cryptotrader.nodes" = {msg = "Domain layer must not import from nodes/ -- dependency direction is nodes -> domain, not the reverse."}
+"cryptotrader.graph" = {msg = "Domain layer must not import from graph.py -- graph.py is the entry-point assembler above the nodes layer."}
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**/*.py" = ["T201"]
+# Scripts are entry-layer launchers and may import graph.py / nodes (TID251 exempt).
+# staging_validate.py uses Chinese docstrings/comments (RUF002/RUF003),
+# subprocess for migrate dry-run (S603), and Callable at runtime (TCH003).
+"scripts/**/*.py" = ["T201", "TID251", "RUF002", "RUF003", "S603", "TCH003"]
+# spec 020c: lineage.py uses subprocess to invoke git CLI (intentional, no user input).
+# S603 (subprocess call) and S607 (partial path) are false positives here.
+"src/cryptotrader/ops/lineage.py" = ["S603", "S607"]
+# journal/store.py: SQLAlchemy declarative classes (Base, Row) assigned in functions
+# follow class-naming convention even though N806 sees them as variables.
+"src/cryptotrader/journal/store.py" = ["N806"]
+# _compat.py: Central UTC/StrEnum shim for Python 3.10 runtime compatibility.
+# UP042 (newer ruff) suppressed inline on the class so the older ruff used by
+# tests/test_arch_boundary_8_2.py does not error on an unknown rule selector.
+"src/cryptotrader/_compat.py" = ["UP036", "UP017"]
+# MCP Server docstrings use Chinese for tool descriptions (consumed by LLM agents)
+"src/cryptotrader/mcp/servers/*.py" = ["RUF002"]
+# learning/memory.py, curation.py, skill_proposal.py and agents/skills/* contain
+# Chinese docstrings + LLM prompts (spec 014 two-layer architecture). Fullwidth
+# punctuation is intentional and matches the project's CLAUDE.md guidance
+# ("generate responses in Simplified Chinese").
+# TCH003: Path is used at runtime in many functions (Path("..."), default args).
+# C901: distill_patterns is genuinely complex (4-layer anti-overfitting). Splitting
+#       further would obscure the algorithm flow.
+# E501: Long lines in regex pattern strings / Chinese docstrings (CJK width).
+# SIM105/SIM108/PERF401/B005: stylistic suggestions — keep readable form.
+"src/cryptotrader/agents/skills/*.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "PERF401", "SIM105"]
+"src/cryptotrader/learning/memory.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "C901", "PERF401", "SIM108", "B005"]
+"src/cryptotrader/learning/curation.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+"src/cryptotrader/learning/skill_proposal.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "E501"]
+"src/cryptotrader/nodes/reflection.py" = ["RUF001", "RUF002", "RUF003"]
+# journal.py: spec 014 added Chinese-comment sections for case writing + PnL backfill.
+"src/cryptotrader/nodes/journal.py" = ["RUF001", "RUF002", "RUF003"]
+# spec 015 (runtime safety guardrails): comments + docstrings + LLM prompts use
+# en-dash, minus, ATR multiplication-sign for readability. C901 on risk_check
+# acknowledged — the function legitimately handles many guardrail branches.
+"src/cryptotrader/agents/macro.py" = ["RUF001"]
+# Chinese comments / docstrings in 3 core modules (spec 022 stamp gate cleanup).
+# RUF002 docstring fullwidth punctuation / RUF003 comment ambiguous chars / RUF100
+# stale noqa directives (BLE001 disabled at top-level since spec 020c).
+# portfolio/manager.py merged into existing per-file-ignore below.
+"src/cryptotrader/cycle_lock.py" = ["RUF003"]
+"src/cryptotrader/llm/reasoning_compat.py" = ["RUF001", "RUF002", "RUF003", "TC003"]
+"src/cryptotrader/risk/checks/position.py" = ["RUF002", "RUF003", "RUF100"]
+"src/cryptotrader/data/macro.py" = ["RUF001", "RUF003"]
+"src/cryptotrader/debate/verdict.py" = ["RUF001", "RUF002", "RUF003", "E501"]
+"src/cryptotrader/debate/researchers.py" = ["RUF001", "RUF002", "RUF003", "E501"]
+"src/cryptotrader/debate/challenge.py" = ["RUF001", "RUF002", "RUF003", "E501"]
+"src/cryptotrader/nodes/debate.py" = ["RUF001", "RUF002", "RUF003"]
+"src/cryptotrader/nodes/data.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"src/cryptotrader/nodes/verdict.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"src/cryptotrader/nodes/execution.py" = ["RUF001", "RUF002", "RUF003"]
+"src/cryptotrader/risk/checks/concentration.py" = ["RUF001", "RUF002", "RUF003"]
+"src/cryptotrader/execution/exchange.py" = ["RUF001", "RUF002", "RUF003", "C901", "SIM105", "SIM108"]
+"src/cryptotrader/tracing.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_macro_concentration.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_macro_coverage.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_post_process_verdict.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_debate_anti_ratchet.py" = ["RUF001", "RUF002", "RUF003"]
+# spec 014 / spec 022 test files use Chinese docstrings + assertion messages.
+"tests/test_two_layer_architecture.py" = ["RUF001", "RUF002", "RUF003", "S603", "S607"]
+"tests/test_skill_provider_internal_path.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skills_endpoint.py" = ["TCH002", "TCH003", "PT001"]
+"tests/test_agent_memory_writer.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_anti_overfitting_equivalence.py" = ["RUF001", "RUF002", "RUF003"]
+# spec 018 migration script + tests use Chinese docstrings/comments.
+"scripts/migrate_017_to_018.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_migrate_017_to_018.py" = ["RUF001", "RUF002", "RUF003", "S603", "S607"]
+# spec 018 evolution modules use Chinese docstrings/comments.
+"src/cryptotrader/learning/evolution/_io.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+"src/cryptotrader/learning/evolution/provider.py" = ["RUF001", "RUF002", "RUF003", "PERF401"]
+"src/cryptotrader/learning/evolution/fsm.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"tests/test_fsm.py" = ["RUF001", "RUF002", "RUF003"]
+"src/cryptotrader/nodes/evolution.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_evolving_memory_provider.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+"tests/test_evolution_node.py" = ["RUF001", "RUF002", "RUF003", "SIM117"]
+"src/api/routes/memory.py" = ["RUF001", "RUF002", "RUF003", "C901", "RUF100"]
+"tests/test_api_memory.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+"tests/test_e2e_memory_evolution.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+"tests/test_load_skill_tool.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_applied_pattern_parser.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_reflection_pattern_distill.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skill_proposal.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skills_curation.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skills_loader.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skills_middleware.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skills_perf.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+# spec 017b: snapshot_renderer + agent config test files use Chinese docstrings/comments.
+# C901 acknowledged — render_crypto_snapshot handles all crypto domain fields verbatim
+# from BaseAgent._build_prompt() (spec 017b FR-Y12 verbatim migration requirement).
+"src/cryptotrader/agents/snapshot_renderer.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"tests/test_snapshot_renderer.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_tech_agent.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_chain_agent.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_news_agent.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_macro_agent.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_e2e_prompt_externalization.py" = ["RUF001", "RUF002", "RUF003", "S101"]
+# spec 017a (PromptBuilder Foundation): docstrings + section labels + test
+# fixtures use Chinese characters and fullwidth punctuation, matching the
+# project's CLAUDE.md guidance ("generate responses in Simplified Chinese").
+"src/cryptotrader/agents/prompt_builder.py" = ["RUF001", "RUF002", "RUF003", "C901", "PERF401", "C401", "PERF403", "TCH003"]
+"tests/test_prompt_builder.py" = ["RUF001", "RUF002", "RUF003"]
+# spec 019 migration script + tests + new evolution modules use Chinese docstrings/comments.
+"scripts/migrate_018_to_019.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"tests/test_migrate_018_to_019.py" = ["RUF001", "RUF002", "RUF003"]
+"src/cryptotrader/learning/evolution/idf.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"src/cryptotrader/learning/evolution/skill_metadata_inference.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "E501", "SIM108"]
+"src/cryptotrader/learning/evolution/skill_provider.py" = ["RUF001", "RUF002", "RUF003", "C901"]
+"tests/test_idf.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skill_metadata_inference.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_evolving_skill_provider.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_skill_proposal_metadata_inference.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "F841"]
+"tests/test_api_memory_skills.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "PT001"]
+"tests/test_e2e_skill_evolution.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "F401"]
+"tests/test_token_budget.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_config_loader.py" = ["RUF001", "RUF002", "RUF003", "E501"]
+# portfolio/manager.py: same SQLAlchemy declarative-class pattern as journal/store.
+# spec 022 stamp gate: also covers Chinese comments + stale BLE001 noqa.
+"src/cryptotrader/portfolio/manager.py" = ["N806", "TID251", "RUF001", "RUF002", "RUF003", "RUF100"]
+# cli/main.py:
+# N806 — SQLAlchemy declarative class assigned in function (Base = declarative_base()).
+# S104 — uvicorn's --host default is 0.0.0.0 by design (containers expose the port).
+# S603/S607 — `arena web` shells out to the user's local pnpm with hardcoded argv.
+# E402 — load_dotenv() must run before project imports that read env at import-time.
+"src/cli/main.py" = ["N806", "S104", "S603", "S607", "TID251", "E402", "RUF001", "RUF002", "RUF003", "E501"]
+# state.py uses operator, Sequence, BaseMessage at runtime inside Annotated[]
+# (LangGraph calls get_type_hints() to extract channel reducers at class creation)
+"src/cryptotrader/state.py" = ["TCH002", "TCH003"]
+# nodes/*.py: ArenaState is inspected at runtime by LangGraph via get_type_hints()
+# when functions are registered as graph nodes/conditional edges.
+# TID251 exempted: nodes/ IS the orchestration layer above domain; it may reference
+# sibling node modules via lazy imports without violating the boundary rule.
+"src/cryptotrader/nodes/*.py" = ["TCH001", "TID251"]
+# graph.py assembles the LangGraph topology from nodes.
+"src/cryptotrader/graph.py" = ["TID251"]
+# scheduler.py and backtest/engine.py are entry-layer orchestrators above nodes.
+"src/cryptotrader/scheduler.py" = ["TID251"]
+"src/cryptotrader/backtest/engine.py" = ["TID251"]
+# api/routes/chat.py: SSE chat endpoint dispatches via build_chat_graph() -- the
+# routes layer is entry-level above nodes/graph and may import the assembler.
+"src/api/routes/chat.py" = ["TID251"]
+# main.py is FastAPI entry-layer -- lifespan hook may import nodes for shutdown.
+# E402 — load_dotenv() must run before api.dependencies import-time AUTH_MODE/API_KEY check.
+"src/api/main.py" = ["TID251", "E402"]
+# tests are allowed to import any module for integration and boundary testing.
+# S603 exempted: subprocess.run calls in tests invoke known, trusted CLI tools (ruff, pytest).
+"tests/*.py" = ["TID251", "S603", "S607", "ASYNC100"]
+# spec 020a: staging_validate + new test files use Chinese docstrings/comments and
+# pytest.mark.asyncio patterns. PT015 is suppressed for run_step error path tests
+# that intentionally use assert False to simulate failures.
+"tests/test_staging_validate.py" = ["RUF001", "RUF002", "RUF003", "PT015", "E402"]
+"tests/test_llm_usage_cache_attr.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_ive_async.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_ive.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_metrics_endpoint_cache.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_e2e_trilogy_ops.py" = ["RUF001", "RUF002", "RUF003", "TCH003"]
+# spec 021: new test files use Chinese docstrings/comments and pytest-asyncio style.
+"tests/test_distill_patterns_cold_start.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_pattern_slug_generation.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_daemon_pattern_extraction.py" = ["RUF001", "RUF002", "RUF003", "PT023"]
+"tests/test_cli_experience_distill.py" = ["RUF001", "RUF002", "RUF003"]
+"tests/test_e2e_pattern_cold_start.py" = ["RUF001", "RUF002", "RUF003", "PT023"]
+# spec 024 API patterns endpoint test uses Chinese docstrings/comments + runtime Path.
+"tests/test_api_memory_patterns.py" = ["RUF001", "RUF002", "RUF003", "TCH003", "PT001"]
+# spec 020a: observability module uses Chinese docstrings/comments.
+"src/cryptotrader/observability/*.py" = ["RUF001", "RUF002", "RUF003"]
+# spec 020a: observability imports in log_llm_usage are used at runtime (TCH003).
+"src/cryptotrader/agents/base.py" = ["TCH003"]
+# spec 021: daemon.py uses Chinese docstrings in new methods.
+"src/cryptotrader/ops/daemon.py" = ["RUF001", "RUF002", "RUF003"]

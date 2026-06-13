@@ -1,0 +1,51 @@
+"""Order management with state transitions."""
+
+from __future__ import annotations
+
+import logging
+from typing import TYPE_CHECKING
+
+from cryptotrader.models import VALID_TRANSITIONS, Order, OrderStatus
+
+if TYPE_CHECKING:
+    from cryptotrader.execution.exchange import ExchangeAdapter
+
+logger = logging.getLogger(__name__)
+
+
+class OrderManager:
+    def transition(self, order: Order, new_status: OrderStatus) -> Order:
+        allowed = VALID_TRANSITIONS.get(order.status, set())
+        if new_status not in allowed:
+            raise ValueError(f"Invalid transition: {order.status.value} -> {new_status.value}")
+        order.status = new_status
+        return order
+
+    async def place(self, order: Order, exchange: ExchangeAdapter) -> tuple[Order, dict]:
+        """Place order and return (order, exchange_result) tuple."""
+        self.transition(order, OrderStatus.SUBMITTED)
+        result: dict = {}
+        try:
+            result = await exchange.place_order(order)
+            order.exchange_id = result.get("id")
+            status = result.get("status", "")
+            if status in ("closed", "filled"):
+                self.transition(order, OrderStatus.FILLED)
+            elif status == "partially_filled":
+                self.transition(order, OrderStatus.PARTIALLY_FILLED)
+            elif status in ("canceled", "cancelled"):
+                self.transition(order, OrderStatus.CANCELLED)
+            elif status == "open":
+                pass  # remain SUBMITTED, not yet filled
+            else:
+                logger.warning("Unknown order status from exchange: %s, marking FAILED", status)
+                self.transition(order, OrderStatus.FAILED)
+        except Exception as e:
+            logger.warning("Order placement failed: %s: %s", type(e).__name__, e, exc_info=True)
+            # Surface the error to the caller so it can be journaled and shown
+            # to the user (rule 3 of docs/logging-conventions.md). Without this
+            # the order silently disappears and `is_filled=false` has no reason.
+            result["error_type"] = type(e).__name__
+            result["error_msg"] = str(e)
+            self.transition(order, OrderStatus.FAILED)
+        return order, result

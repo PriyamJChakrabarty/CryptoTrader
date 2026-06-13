@@ -1,0 +1,53 @@
+{
+  "title": "Memory Evolution",
+  "description": "Rule FSM states, IVE classification history, archived records",
+  "loading": "Loading…",
+  "rules_grid": {
+    "title": "Rule State Matrix",
+    "agent": "Agent",
+    "hint": "Click a count to view rules in that bucket"
+  },
+  "rules_detail": {
+    "title": "Rule Details",
+    "list_title": "Rule List",
+    "empty": "No matching rules",
+    "empty_hint": "Try adjusting agent / status filters"
+  },
+  "pattern_detail": {
+    "stats": "Stats",
+    "meta": "Metadata",
+    "body": "Rule Body",
+    "cases_chain": "Source Cycle Chain",
+    "not_found": "Rule not found"
+  },
+  "cases_timeline": {
+    "title": "IVE Classification Timeline (24h)",
+    "empty": "No cases in the last 24h"
+  },
+  "archived_rules": {
+    "title": "Archived Rules",
+    "empty": "No archived rules"
+  },
+  "transitions": {
+    "title": "FSM Transitions",
+    "empty": "No recent state transitions"
+  },
+  "maturity": {
+    "observed": "Observed",
+    "probationary": "Probationary",
+    "active": "Active",
+    "deprecated": "Deprecated",
+    "archived": "Archived"
+  },
+  "skills": {
+    "title": "Skills List",
+    "empty": "No skills found",
+    "proposals": "Skill Proposals",
+    "agents": {
+      "tech": "Technical Analysis",
+      "chain": "On-Chain Analysis",
+      "news": "News Sentiment",
+      "macro": "Macro Economics"
+    }
+  }
+}

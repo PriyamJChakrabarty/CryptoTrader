@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import logging
+
+from prometheus_client import Counter, Histogram
+
+logger = logging.getLogger(__name__)
+
+_ct_llm_calls_total = Counter(
+    "ct_llm_calls_total",
+    "LLM 调用总次数",
+    ["model", "node"],
+)
+
+_ct_debate_skipped_total = Counter(
+    "ct_debate_skipped_total",
+    "辩论环节被跳过的总次数",
+)
+
+_ct_verdict_total = Counter(
+    "ct_verdict_total",
+    "裁决结果总次数",
+    ["action"],
+)
+
+_ct_risk_rejected_total = Counter(
+    "ct_risk_rejected_total",
+    "风控拒绝总次数",
+    ["check_name"],
+)
+
+_ct_trade_executed_total = Counter(
+    "ct_trade_executed_total",
+    "交易执行总次数",
+    ["engine", "side"],
+)
+
+_ct_execution_latency_ms = Histogram(
+    "ct_execution_latency_ms",
+    "交易执行延迟(毫秒)",
+    ["engine"],
+    buckets=[10, 50, 100, 250, 500, 1000, 2500, 5000],
+)
+
+_ct_pipeline_duration_ms = Histogram(
+    "ct_pipeline_duration_ms",
+    "完整流水线执行时长(毫秒)",
+    buckets=[500, 1000, 2000, 5000, 10000, 30000, 60000],
+)
+
+# spec 014 followup (deep-review production minor): track
+# market_type_for() parse-failure fallback rate. A persistently non-zero
+# counter signals malformed pair strings reaching the DB writer.
+_ct_pair_market_type_fallback_total = Counter(
+    "ct_pair_market_type_fallback_total",
+    "Pair.parse 失败、market_type_for 退回 'spot' 的总次数",
+)
+
+
+# -- MetricsCollector --
+
+
+class MetricsCollector:
+    def inc_llm_calls(self, *, model: str, node: str) -> None:
+        try:
+            _ct_llm_calls_total.labels(model=model, node=node).inc()
+        except Exception:
+            logger.warning("递增 ct_llm_calls_total 失败", exc_info=True)
+
+    def inc_debate_skipped(self) -> None:
+        try:
+            _ct_debate_skipped_total.inc()
+        except Exception:
+            logger.warning("递增 ct_debate_skipped_total 失败", exc_info=True)
+
+    def inc_verdict(self, *, action: str) -> None:
+        try:
+            _ct_verdict_total.labels(action=action).inc()
+        except Exception:
+            logger.warning("递增 ct_verdict_total 失败", exc_info=True)
+
+    def inc_risk_rejected(self, *, check_name: str) -> None:
+        try:
+            _ct_risk_rejected_total.labels(check_name=check_name).inc()
+        except Exception:
+            logger.warning("递增 ct_risk_rejected_total 失败", exc_info=True)
+
+    def inc_trade_executed(self, *, engine: str, side: str) -> None:
+        try:
+            _ct_trade_executed_total.labels(engine=engine, side=side).inc()
+        except Exception:
+            logger.warning("递增 ct_trade_executed_total 失败", exc_info=True)
+
+    def observe_execution_latency(self, *, engine: str, ms: float) -> None:
+        try:
+            _ct_execution_latency_ms.labels(engine=engine).observe(ms)
+        except Exception:
+            logger.warning("记录 ct_execution_latency_ms 失败", exc_info=True)
+
+    def inc_pair_market_type_fallback(self) -> None:
+        """spec 014 followup."""
+        _ct_pair_market_type_fallback_total.inc()
+
+    def observe_pipeline_duration(self, *, ms: float) -> None:
+        try:
+            _ct_pipeline_duration_ms.observe(ms)
+        except Exception:
+            logger.warning("记录 ct_pipeline_duration_ms 失败", exc_info=True)
+
+
+_collector: MetricsCollector | None = None
+
+
+def get_metrics_collector() -> MetricsCollector:
+    global _collector
+    if _collector is None:
+        _collector = MetricsCollector()
+    return _collector

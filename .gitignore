@@ -1,0 +1,10 @@
+# frontend (Next.js)
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+
+# backend (FastAPI)
+backend/.venv/
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.env

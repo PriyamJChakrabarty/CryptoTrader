@@ -1,16 +1,19 @@
 # Crypto Trading Advisor
 
 A small agentic chat bot that gives a plain-English BUY / SELL / HOLD
-opinion on a crypto coin. It looks up the coin's live price, then a Groq
-LLM (via LangChain) reasons about it. Advisory only — no real or simulated
-trades, no exchange keys, not financial advice.
+opinion on a crypto coin, and can act on it with a $10,000 **paper (fake)
+money** balance — buying and selling for real inside the app, with no real
+exchange or real funds involved anywhere. The frontend also shows a live
+24h price chart. Not financial advice.
 
 ```
-Browser (frontend/, Next.js)
-      -> fetch POST /chat
+Browser (frontend/, Next.js + Tailwind)
+      -> fetch POST /chat, GET /portfolio, GET /price-history
 FastAPI (backend/, Python)
       -> LangChain agent (ChatGroq, tool-calling)
-      -> tool: get_crypto_price -> CoinGecko public API (no key needed)
+      -> tools: get_crypto_price, buy_crypto, sell_crypto, get_portfolio
+      -> portfolio.json: fake cash + holdings, no exchange involved
+      -> CoinGecko public API (no key needed) for prices/history
 Groq (llama-3.3-70b-versatile)
 ```
 
@@ -140,9 +143,12 @@ http vs https).
 
 ## Project layout
 
-- `frontend/` — Next.js chat UI (plain JavaScript, one page).
-- `backend/` — FastAPI server exposing `POST /chat`, backed by a LangChain
-  agent using Groq.
+- `frontend/` — Next.js chat UI (plain JavaScript, Tailwind CSS), plus a
+  live price chart (`app/PriceChart.js`, via recharts).
+- `backend/` — FastAPI server exposing `POST /chat`, `GET /portfolio`, and
+  `GET /price-history`, backed by a LangChain agent using Groq.
+  `portfolio.py` is the fake-money paper trading ledger (`portfolio.json`,
+  gitignored, resets by deleting the file).
 - `brainstorm/` — early spec ideation docs, unrelated to this app.
 - `Archive/` — the original, much larger multi-agent CryptoTrader system
   this repo used to contain. See `Archive/README.md` for details.

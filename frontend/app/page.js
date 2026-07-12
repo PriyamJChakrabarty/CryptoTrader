@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import PriceChart from "./PriceChart";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
@@ -37,31 +38,44 @@ export default function Home() {
   }
 
   return (
-    <main style={{ maxWidth: 600, margin: "40px auto", padding: 16 }}>
-      <h1>Crypto Trading Advisor</h1>
-      <p style={{ opacity: 0.7 }}>
-        Ask about a coin, e.g. &ldquo;should I buy BTC?&rdquo; Not financial advice.
-      </p>
+    <main className="mx-auto max-w-2xl space-y-4 p-4">
+      <header>
+        <h1 className="text-xl font-semibold">Crypto Trading Advisor</h1>
+        <p className="text-sm text-neutral-500 dark:text-neutral-400">
+          Ask about a coin, or tell it to buy/sell with your paper balance. Not
+          financial advice.
+        </p>
+      </header>
 
-      <div style={{ border: "1px solid #334155", borderRadius: 8, padding: 16, minHeight: 300 }}>
-        {messages.length === 0 && <p style={{ opacity: 0.5 }}>No messages yet.</p>}
+      <PriceChart symbol="btc" />
+
+      <div className="min-h-[300px] space-y-3 rounded-lg border border-black/10 p-4 dark:border-white/10">
+        {messages.length === 0 && (
+          <p className="text-sm text-neutral-400">No messages yet.</p>
+        )}
         {messages.map((m, i) => (
-          <div key={i} style={{ marginBottom: 12 }}>
-            <strong>{m.role === "user" ? "You" : "Agent"}:</strong>
-            <p style={{ margin: "4px 0 0" }}>{m.text}</p>
+          <div key={i}>
+            <span className="text-sm font-medium">
+              {m.role === "user" ? "You" : "Agent"}:
+            </span>
+            <p className="mt-0.5 text-sm">{m.text}</p>
           </div>
         ))}
-        {loading && <p style={{ opacity: 0.5 }}>Thinking...</p>}
+        {loading && <p className="text-sm text-neutral-400">Thinking...</p>}
       </div>
 
-      <form onSubmit={sendMessage} style={{ display: "flex", gap: 8, marginTop: 16 }}>
+      <form onSubmit={sendMessage} className="flex gap-2">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask about a coin..."
-          style={{ flex: 1, padding: 8, borderRadius: 4, border: "1px solid #334155" }}
+          placeholder="Ask about a coin, or 'buy $500 of BTC'..."
+          className="flex-1 rounded-md border border-black/10 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 dark:border-white/10"
         />
-        <button type="submit" disabled={loading} style={{ padding: "8px 16px" }}>
+        <button
+          type="submit"
+          disabled={loading}
+          className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+        >
           Send
         </button>
       </form>

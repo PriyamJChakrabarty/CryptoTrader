@@ -76,9 +76,11 @@ backend (not both); either works with the same Vercel frontend setup below.
    else to configure there.
 4. In **Settings → Variables**, add:
    - `GROQ_API_KEY` = your key from console.groq.com
-   - `FRONTEND_ORIGIN` = your Vercel URL (you'll get this in step 2 below —
-     come back and set it after the frontend is deployed; `https://*.vercel.app`
-     wildcards aren't supported, use the exact URL)
+   - `FRONTEND_ORIGIN_REGEX` = `https://your-vercel-project-name.*\.vercel\.app`
+     (matches every Vercel preview + production URL for that project in one
+     go — Vercel mints a new unique URL per deploy, e.g.
+     `crypto-trader-82ncc7bp4-yourteam.vercel.app`, so a single exact
+     `FRONTEND_ORIGIN` breaks on the next deploy)
 5. In **Settings → Networking**, click **Generate Domain** to get a public
    URL like `https://your-app.up.railway.app`.
 6. Verify it's live:
@@ -97,12 +99,13 @@ whole service definition automatically:
    proposes a `crypto-trading-backend` web service with **Root Directory**
    already set to `backend`, build command `pip install -r requirements.txt`,
    and start command `uvicorn main:app --host 0.0.0.0 --port $PORT`.
-2. Click **Apply**. It'll prompt you for the two env vars marked
-   `sync: false` in `render.yaml`:
+2. Click **Apply**. It'll prompt you for the env vars marked `sync: false`
+   in `render.yaml`:
    - `GROQ_API_KEY` = your key from console.groq.com
-   - `FRONTEND_ORIGIN` = your Vercel URL (set a placeholder for now, update
-     it after step 2 below — Render redeploys automatically when you change
-     an env var)
+   - `FRONTEND_ORIGIN_REGEX` = `https://your-vercel-project-name.*\.vercel\.app`
+     (matches every Vercel preview + production URL for that project —
+     Vercel mints a new unique URL per deploy, so a single exact
+     `FRONTEND_ORIGIN` breaks on the next deploy)
 3. Once deployed, your URL is `https://crypto-trading-backend.onrender.com`
    (or check **Settings** for the exact assigned URL).
 4. Verify it's live:
@@ -129,17 +132,18 @@ whole service definition automatically:
 3. Add an environment variable:
    - `NEXT_PUBLIC_BACKEND_URL` = the Railway URL from step 1 (e.g.
      `https://your-app.up.railway.app`)
-4. Click **Deploy**. You'll get a URL like `https://your-app.vercel.app`.
-5. Go back to Railway or Render and set `FRONTEND_ORIGIN` to that exact
-   Vercel URL, then redeploy the backend so CORS allows requests from it.
+4. Click **Deploy**. You'll get a URL like
+   `https://crypto-trader-<hash>-<team>.vercel.app`.
+5. If `FRONTEND_ORIGIN_REGEX` on Railway/Render doesn't already cover this
+   project name, update it to match and redeploy the backend.
 
 ### 3. Confirm it all works
 
 Open the Vercel URL in a browser, ask the chat "should I buy ETH?", and
 confirm you get a reply. If it fails, open the browser dev tools Network
-tab — a CORS error there almost always means `FRONTEND_ORIGIN` on the
-backend doesn't exactly match the Vercel URL (check for trailing slashes /
-http vs https).
+tab — a CORS error there almost always means `FRONTEND_ORIGIN_REGEX` (or
+`FRONTEND_ORIGIN`) on the backend doesn't match the Vercel URL you're
+actually on (check the project name in the regex, and http vs https).
 
 ## Project layout
 

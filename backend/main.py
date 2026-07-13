@@ -11,13 +11,18 @@ from coins import to_coin_id
 
 app = FastAPI()
 
-# Comma-separated list of allowed frontend URLs, e.g. your Vercel domain.
-# Defaults to the local Next.js dev server.
+# Comma-separated list of exact allowed frontend URLs (e.g. local dev).
 origins = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000").split(",")
+
+# Optional regex for URLs that change per deploy, e.g. Vercel preview
+# deployments like https://crypto-trader-<hash>-<team>.vercel.app. Example:
+# FRONTEND_ORIGIN_REGEX=https://crypto-trader.*\.vercel\.app
+origin_regex = os.getenv("FRONTEND_ORIGIN_REGEX")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
+    allow_origin_regex=origin_regex,
     allow_methods=["*"],
     allow_headers=["*"],
 )

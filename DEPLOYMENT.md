@@ -49,3 +49,5 @@ Sources:
 
 Blueprint YAML Reference – Render Docs
 render-oss/skills – render-blueprints SKILL.md
+
+Test: uv run python test_api.py https://crypto-trading-backend-rndz.onrender.com

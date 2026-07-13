@@ -12,3 +12,5 @@ services:
         sync: false
       - key: FRONTEND_ORIGIN
         sync: false
+      - key: FRONTEND_ORIGIN_REGEX
+        sync: false

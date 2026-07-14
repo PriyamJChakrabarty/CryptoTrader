@@ -1,160 +1,104 @@
-# Crypto Trading Advisor
+# QuantVision | AI-Driven Trading Strategy Studio 📈
 
-A small agentic chat bot that gives a plain-English BUY / SELL / HOLD
-opinion on a crypto coin, and can act on it with a $10,000 **paper (fake)
-money** balance — buying and selling for real inside the app, with no real
-exchange or real funds involved anywhere. The frontend also shows a live
-24h price chart. Not financial advice.
+QuantVision is an institutional-grade trading strategy optimization platform. It leverages Reinforcement Learning (Proximal Policy Optimization) to discover profitable trading signals on historical market data, compared against traditional financial benchmarks
 
-```
-Browser (frontend/, Next.js + Tailwind)
-      -> fetch POST /chat, GET /portfolio, GET /price-history
-FastAPI (backend/, Python)
-      -> LangChain agent (ChatGroq, tool-calling)
-      -> tools: get_crypto_price, buy_crypto, sell_crypto, get_portfolio
-      -> portfolio.json: fake cash + holdings, no exchange involved
-      -> CoinGecko public API (no key needed) for prices/history
-Groq (llama-3.3-70b-versatile)
-```
 
-## Setup
+## 🛠️ Tech Stack
 
-### 1. Backend
+### Frontend (The Dashboard)
+- **Next.js 14+**: Application Framework (App Router)
+- **TypeScript**: Precision state management
+- **Tailwind CSS**: Modern Glassmorphic styling
+- **Framer Motion**: High-fidelity cinematic animations
+- **Recharts**: Institutional-grade data visualization
+- **Lucide React**: Vector-perfect icon system
 
-```
-cd backend
-uv venv
-uv pip install -r requirements.txt
-```
+### Backend (The Brain)
+- **FastAPI**: Ultra-fast asynchronous REST API
+- **Python 3.10+**: Core logic and data processing
+- **Uvicorn**: High-performance production server
 
-Add your [Groq API key](https://console.groq.com) to `backend/.env`:
+### AI & Quant Engineering
+- **Stable-Baselines3**: Proximal Policy Optimization (PPO) RL Agents
+- **Gymnasium**: Custom environment for trading simulations
+- **yFinance**: Real-time Global Market Data Engine
+- **Pandas & NumPy**: High-speed numerical analysis
+- **Modern Portfolio Theory (MPT)**: Mathematical optimization for Sharpe Ratios
 
-```
-GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxxxxxxx
-```
+## 🏗️ System Architecture
 
-Run it:
-
-```
-uv run uvicorn main:app --reload
-```
-
-Backend runs on http://localhost:8000.
-
-Check it's working:
-
-```
-uv run python test_api.py
+```mermaid
+graph TD
+    User([User Experience]) <-->|TypeScript / Tailwind| FE[Next.js Frontend]
+    FE <-->|REST API / Axios| BE[FastAPI Backend]
+    BE <-->|Python / yFinance| Engine[Quant Core Engine]
+    
+    subgraph "Quantitative Engine"
+        Engine ---> RL[SB3 RL Agent]
+        Engine ---> MPT[Portfolio Optimizer]
+        Engine ---> Stress[Regime Simulator]
+    end
+    
+    subgraph "Visual Stack"
+        FE ---> Framer[Framer Motion Animations]
+        FE ---> Charts[Recharts Visualization]
+    end
 ```
 
-### 2. Frontend
+## 🚀 Key Features
 
+- **Startup Hub v3.0**: A professional, multi-tabbed dashboard for **Global Alpha Signaling**, **Portfolio Optimization**, and **Crisis Stress Testing**.
+- **Neural Portfolio Optimization**: Automated asset allocation using **Modern Portfolio Theory (MPT)** to maximize the Sharpe Ratio across a custom universe.
+- **Historical Stress Testing**: Specialized simulation of performance during major market regimes (2008 Crisis, 2020 COVID, 2022 Inflation).
+- **Unlimited Asset Universe**: Pull real-time data for any global stock, ETF, or cryptocurrency via integrated Yahoo Finance search.
+- **Institutional Risk Suite**: Real-time **Value at Risk (VaR)**, **Benchmark Beta**, and **Correlation Heatmaps**.
+
+## 📁 Modular Project Structure
+
+```text
+├── src/
+│   ├── core/       # RL Environment & Strategy Baselines
+│   ├── data/       # Professional Data Pipeline (yFinance)
+│   ├── features/   # Technical Indicator Engine
+│   └── analysis/   # Metrics & Visualization Suite
+├── models/         # Serialized RL Agents
+├── app.py          # Streamlit Dashboard (Entry Point)
+└── train.py        # Model Training Pipeline
 ```
-cd frontend
-npm install
-npm run dev
-```
 
-Frontend runs on http://localhost:3000 and talks to the backend at the URL
-set in `frontend/.env.local` (defaults to `http://localhost:8000`).
+## 🛠️ Installation
 
-## Deployment (Railway or Render + Vercel)
-
-Push this repo to GitHub first (`origin` is already set to
-`github.com/PriyamJChakrabarty/CryptoTrader`) — Railway, Render, and Vercel
-all deploy straight from a GitHub repo. Pick Railway or Render for the
-backend (not both); either works with the same Vercel frontend setup below.
-
-### 1a. Backend on Railway
-
-1. Go to [railway.app](https://railway.app) → **New Project** → **Deploy
-   from GitHub repo** → pick this repo.
-2. Railway will ask which folder to deploy since this is a monorepo. In the
-   service's **Settings → Source**, set **Root Directory** to `backend`.
-3. It auto-detects Python (Nixpacks) and uses `backend/railway.json` for the
-   start command (`uvicorn main:app --host 0.0.0.0 --port $PORT`) — nothing
-   else to configure there.
-4. In **Settings → Variables**, add:
-   - `GROQ_API_KEY` = your key from console.groq.com
-   - `FRONTEND_ORIGIN_REGEX` = `https://your-vercel-project-name.*\.vercel\.app`
-     (matches every Vercel preview + production URL for that project in one
-     go — Vercel mints a new unique URL per deploy, e.g.
-     `crypto-trader-82ncc7bp4-yourteam.vercel.app`, so a single exact
-     `FRONTEND_ORIGIN` breaks on the next deploy)
-5. In **Settings → Networking**, click **Generate Domain** to get a public
-   URL like `https://your-app.up.railway.app`.
-6. Verify it's live:
-   ```
-   uv run python test_api.py https://your-app.up.railway.app
-   ```
-   (run this from `backend/`, with `GROQ_API_KEY` already set on Railway)
-
-### 1b. Backend on Render (alternative to Railway)
-
-This repo includes `render.yaml` at the root, so Render can pick up the
-whole service definition automatically:
-
-1. Go to [render.com](https://dashboard.render.com) → **New +** →
-   **Blueprint** → connect this GitHub repo. Render reads `render.yaml` and
-   proposes a `crypto-trading-backend` web service with **Root Directory**
-   already set to `backend`, build command `pip install -r requirements.txt`,
-   and start command `uvicorn main:app --host 0.0.0.0 --port $PORT`.
-2. Click **Apply**. It'll prompt you for the env vars marked `sync: false`
-   in `render.yaml`:
-   - `GROQ_API_KEY` = your key from console.groq.com
-   - `FRONTEND_ORIGIN_REGEX` = `https://your-vercel-project-name.*\.vercel\.app`
-     (matches every Vercel preview + production URL for that project —
-     Vercel mints a new unique URL per deploy, so a single exact
-     `FRONTEND_ORIGIN` breaks on the next deploy)
-3. Once deployed, your URL is `https://crypto-trading-backend.onrender.com`
-   (or check **Settings** for the exact assigned URL).
-4. Verify it's live:
-   ```
-   uv run python test_api.py https://crypto-trading-backend.onrender.com
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/Anish0104/QuantVision
+   cd TradingStrategyOptimization
    ```
 
-   No `render.yaml`? You can also skip the Blueprint and create the service
-   manually: **New +** → **Web Service** → pick this repo → set **Root
-   Directory** to `backend`, **Build Command** to
-   `pip install -r requirements.txt`, **Start Command** to
-   `uvicorn main:app --host 0.0.0.0 --port $PORT` → add the same two env
-   vars from step 2.
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-   Note: Render's free plan spins the service down after 15 minutes of
-   inactivity, so the first request after idling takes ~30-50s to wake up.
+## 💻 Usage
 
-### 2. Frontend on Vercel
+### 1. Train the RL Agent
+Run the training pipeline to generate a strategy for a specific ticker:
+```bash
+python train.py
+```
 
-1. Go to [vercel.com](https://vercel.com) → **Add New → Project** → import
-   this GitHub repo.
-2. In the import screen, set **Root Directory** to `frontend`. Vercel
-   auto-detects Next.js — no build command changes needed.
-3. Add an environment variable:
-   - `NEXT_PUBLIC_BACKEND_URL` = the Railway URL from step 1 (e.g.
-     `https://your-app.up.railway.app`)
-4. Click **Deploy**. You'll get a URL like
-   `https://crypto-trader-<hash>-<team>.vercel.app`.
-5. If `FRONTEND_ORIGIN_REGEX` on Railway/Render doesn't already cover this
-   project name, update it to match and redeploy the backend.
+### 2. Launch the Dashboard
+View the results and compare against benchmarks in the interactive studio:
+```bash
+streamlit run app.py
+```
 
-### 3. Confirm it all works
+## 📊 Evaluation Metrics
+QuantVision evaluates strategies using:
+- **Sharpe Ratio**: Risk-adjusted returns.
+- **Sortino Ratio**: Returns adjusted for downside volatility.
+- **Max Drawdown**: Portfolio "underwater" risk.
+- **Equity Curve Comparison**: Visualizing RL performance vs. Buy & Hold.
 
-Open the Vercel URL in a browser, ask the chat "should I buy ETH?", and
-confirm you get a reply. If it fails, open the browser dev tools Network
-tab — a CORS error there almost always means `FRONTEND_ORIGIN_REGEX` (or
-`FRONTEND_ORIGIN`) on the backend doesn't match the Vercel URL you're
-actually on (check the project name in the regex, and http vs https).
-
-## Project layout
-
-- `frontend/` — Next.js chat UI (plain JavaScript, Tailwind CSS), plus a
-  live price chart (`app/PriceChart.js`, via recharts).
-- `backend/` — FastAPI server exposing `POST /chat`, `GET /portfolio`, and
-  `GET /price-history`, backed by a LangChain agent using Groq.
-  `portfolio.py` is the fake-money paper trading ledger (`portfolio.json`,
-  gitignored, resets by deleting the file).
-- `brainstorm/` — early spec ideation docs, unrelated to this app.
-- `Archive/` — the original, much larger multi-agent CryptoTrader system
-  this repo used to contain. See `Archive/README.md` for details.
-- `GROQ.md` — a general Groq API integration reference.
-- `THEME.md` — the original one-line spec this app was built from.
+---
+*Developed for Portfolio Showcase. Built with Python, Stable-Baselines3, Plotly, and Streamlit.*
